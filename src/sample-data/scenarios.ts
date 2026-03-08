@@ -1,4 +1,10 @@
 import { ReflowInput, WorkCenter, WorkOrder } from "../reflow/types";
+export interface DemoScenario {
+  name: string;
+  description: string;
+  input: ReflowInput;
+  expectedErrorContains?: string;
+}
 
 function buildLine1(): WorkCenter {
   return {
@@ -50,7 +56,7 @@ function wo(params: {
   };
 }
 
-export const scenarios: Array<{ name: string; description: string; input: ReflowInput }> = [
+export const scenarios: DemoScenario[] = [
   {
     name: "Delay Cascade",
     description: "A longer first job pushes dependent downstream jobs later.",
@@ -111,6 +117,32 @@ export const scenarios: Array<{ name: string; description: string; input: Reflow
           start: "2026-03-09T12:30:00Z",
           end: "2026-03-09T14:30:00Z",
           durationMinutes: 120
+        })
+      ]
+    }
+  },
+  {
+    name: "Circular Dependency (Expected Error)",
+    description: "Validates that a circular dependency is rejected with a clear cause.",
+    expectedErrorContains: "Circular dependency detected in work orders",
+    input: {
+      workCenters: [buildLine1()],
+      workOrders: [
+        wo({
+          id: "WO-X",
+          number: "WO-9001",
+          start: "2026-03-09T08:00:00Z",
+          end: "2026-03-09T10:00:00Z",
+          durationMinutes: 120,
+          dependsOn: ["WO-Y"]
+        }),
+        wo({
+          id: "WO-Y",
+          number: "WO-9002",
+          start: "2026-03-09T10:00:00Z",
+          end: "2026-03-09T12:00:00Z",
+          durationMinutes: 120,
+          dependsOn: ["WO-X"]
         })
       ]
     }

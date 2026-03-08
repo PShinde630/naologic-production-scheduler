@@ -23,24 +23,51 @@ function run(): void {
 
     printOrders("Original Schedule", scenario.input.workOrders);
 
-    const result = reflowService.reflow(scenario.input);
+    try {
+      const result = reflowService.reflow(scenario.input);
 
-    printOrders("Updated Schedule", result.updatedWorkOrders);
-
-    console.log("\nChanges");
-    if (result.changes.length === 0) {
-      console.log("- No changes");
-    } else {
-      for (const change of result.changes) {
+      if (scenario.expectedErrorContains) {
+        console.log("\nResult");
         console.log(
-          `- ${change.workOrderId}: start ${change.oldStartDate} -> ${change.newStartDate}, end ${change.oldEndDate} -> ${change.newEndDate}`
+          `- FAIL: Expected an error containing "${scenario.expectedErrorContains}" but scheduling succeeded.`
         );
+        continue;
       }
-    }
 
-    console.log("\nExplanation");
-    for (const line of result.explanation) {
-      console.log(line);
+      printOrders("Updated Schedule", result.updatedWorkOrders);
+
+      console.log("\nChanges");
+      if (result.changes.length === 0) {
+        console.log("- No changes");
+      } else {
+        for (const change of result.changes) {
+          console.log(`- ${change.workOrderId}`);
+          console.log(`  start: ${change.oldStartDate} -> ${change.newStartDate}`);
+          console.log(`  end:   ${change.oldEndDate} -> ${change.newEndDate}`);
+          console.log("  why:");
+          for (const reason of change.reasons) {
+            console.log(`    - ${reason}`);
+          }
+        }
+      }
+
+      console.log("\nExplanation");
+      for (const line of result.explanation) {
+        console.log(line);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (scenario.expectedErrorContains) {
+        const matched = message.includes(scenario.expectedErrorContains);
+        console.log("\nResult");
+        console.log(
+          matched
+            ? `- PASS: Caught expected error cause -> ${message}`
+            : `- FAIL: Error did not match expected cause.\n  expected: ${scenario.expectedErrorContains}\n  actual:   ${message}`
+        );
+      } else {
+        throw error;
+      }
     }
   }
 }
