@@ -1,24 +1,30 @@
+import { DateTime } from "luxon";
 import { MaintenanceWindow, Shift } from "../reflow/types";
 
-const MINUTE_MS = 60 * 1000;
-const HOUR_MS = 60 * MINUTE_MS;
-const DAY_MS = 24 * HOUR_MS;
-
 interface Range {
-  start: Date;
-  end: Date;
+  start: DateTime;
+  end: DateTime;
+}
+
+function toUtcDateTime(date: Date): DateTime {
+  return DateTime.fromJSDate(date, { zone: "utc" });
+}
+
+function toDocDayOfWeek(dateTime: DateTime): number {
+  // Luxon weekday: Monday=1 ... Sunday=7, doc format: Sunday=0 ... Saturday=6
+  return dateTime.weekday % 7;
 }
 
 export function parseIso(input: string): Date {
-  const parsed = new Date(input);
-  if (Number.isNaN(parsed.getTime())) {
+  const parsed = DateTime.fromISO(input, { zone: "utc" });
+  if (!parsed.isValid) {
     throw new Error(`Invalid ISO date: ${input}`);
   }
-  return parsed;
+  return parsed.toJSDate();
 }
 
 export function formatIso(date: Date): string {
-  return date.toISOString();
+  return toUtcDateTime(date).toISO({ suppressMilliseconds: false }) ?? date.toISOString();
 }
 
 export function maxDate(a: Date, b: Date): Date {
@@ -26,29 +32,28 @@ export function maxDate(a: Date, b: Date): Date {
 }
 
 export function addMinutes(date: Date, minutes: number): Date {
-  return new Date(date.getTime() + minutes * MINUTE_MS);
+  return toUtcDateTime(date).plus({ minutes }).toJSDate();
 }
 
 export function minutesBetween(start: Date, end: Date): number {
-  return Math.max(0, Math.floor((end.getTime() - start.getTime()) / MINUTE_MS));
+  const diff = toUtcDateTime(end).diff(toUtcDateTime(start), "minutes").minutes;
+  return Math.max(0, Math.floor(diff));
 }
 
 export function clampToHourUTC(date: Date, hour: number): Date {
-  const d = new Date(date);
-  d.setUTCHours(hour, 0, 0, 0);
-  return d;
+  return toUtcDateTime(date).startOf("day").plus({ hours: hour }).toJSDate();
 }
 
 export function shiftWindowForDate(date: Date, shift: Shift): Range {
-  const start = clampToHourUTC(date, shift.startHour);
-  const end = clampToHourUTC(date, shift.endHour);
-  return { start, end };
+  const base = toUtcDateTime(date).startOf("day");
+  return {
+    start: base.plus({ hours: shift.startHour }),
+    end: base.plus({ hours: shift.endHour }),
+  };
 }
 
-function dayStartUTC(date: Date): Date {
-  const d = new Date(date);
-  d.setUTCHours(0, 0, 0, 0);
-  return d;
+function dayStartUTC(dateTime: DateTime): DateTime {
+  return dateTime.startOf("day");
 }
 
 function shiftsForDay(shifts: Shift[], dayOfWeek: number): Shift[] {
@@ -57,25 +62,29 @@ function shiftsForDay(shifts: Shift[], dayOfWeek: number): Shift[] {
     .sort((a, b) => a.startHour - b.startHour);
 }
 
-function findCurrentShiftWindow(date: Date, shifts: Shift[]): Range | null {
-  const dayShifts = shiftsForDay(shifts, date.getUTCDay());
+function findCurrentShiftWindow(dateTime: DateTime, shifts: Shift[]): Range | null {
+  const dayShifts = shiftsForDay(shifts, toDocDayOfWeek(dateTime));
+
   for (const shift of dayShifts) {
-    const window = shiftWindowForDate(date, shift);
-    if (date >= window.start && date < window.end) {
+    const window = shiftWindowForDate(dateTime.toJSDate(), shift);
+    if (dateTime >= window.start && dateTime < window.end) {
       return window;
     }
   }
+
   return null;
 }
 
-function findNextShiftStart(date: Date, shifts: Shift[]): Date {
-  const baseDay = dayStartUTC(date);
+function findNextShiftStart(dateTime: DateTime, shifts: Shift[]): DateTime {
+  const baseDay = dayStartUTC(dateTime);
+
   for (let offsetDays = 0; offsetDays < 14; offsetDays += 1) {
-    const day = new Date(baseDay.getTime() + offsetDays * DAY_MS);
-    const dayShifts = shiftsForDay(shifts, day.getUTCDay());
+    const day = baseDay.plus({ days: offsetDays });
+    const dayShifts = shiftsForDay(shifts, toDocDayOfWeek(day));
+
     for (const shift of dayShifts) {
-      const candidate = clampToHourUTC(day, shift.startHour);
-      if (candidate >= date) {
+      const candidate = day.startOf("day").plus({ hours: shift.startHour });
+      if (candidate >= dateTime) {
         return candidate;
       }
     }
@@ -86,32 +95,43 @@ function findNextShiftStart(date: Date, shifts: Shift[]): Date {
 
 function normalizeWindows(windows: MaintenanceWindow[]): Range[] {
   return windows
-    .map((w) => ({ start: parseIso(w.startDate), end: parseIso(w.endDate) }))
-    .filter((w) => w.end > w.start)
-    .sort((a, b) => a.start.getTime() - b.start.getTime());
+    .map((w) => ({
+      start: DateTime.fromISO(w.startDate, { zone: "utc" }),
+      end: DateTime.fromISO(w.endDate, { zone: "utc" }),
+    }))
+    .filter((w) => w.start.isValid && w.end.isValid && w.end > w.start)
+    .sort((a, b) => a.start.toMillis() - b.start.toMillis());
 }
 
-function findMaintenanceCovering(date: Date, windows: Range[]): Range | null {
+function findMaintenanceCovering(dateTime: DateTime, windows: Range[]): Range | null {
   for (const window of windows) {
-    if (date >= window.start && date < window.end) {
+    if (dateTime >= window.start && dateTime < window.end) {
       return window;
     }
-    if (window.start > date) {
+
+    if (window.start > dateTime) {
       return null;
     }
   }
+
   return null;
 }
 
-function nextMaintenanceStartInRange(from: Date, to: Date, windows: Range[]): Date | null {
+function nextMaintenanceStartInRange(
+  from: DateTime,
+  to: DateTime,
+  windows: Range[]
+): DateTime | null {
   for (const window of windows) {
     if (window.start >= to) {
       return null;
     }
+
     if (window.start > from && window.start < to) {
       return window.start;
     }
   }
+
   return null;
 }
 
@@ -121,7 +141,7 @@ export function moveToNextWorkingInstant(
   maintenanceWindows: MaintenanceWindow[]
 ): Date {
   const windows = normalizeWindows(maintenanceWindows);
-  let cursor = new Date(date);
+  let cursor = toUtcDateTime(date);
 
   for (let guard = 0; guard < 10000; guard += 1) {
     const currentShift = findCurrentShiftWindow(cursor, shifts);
@@ -132,11 +152,11 @@ export function moveToNextWorkingInstant(
 
     const coveringMaintenance = findMaintenanceCovering(cursor, windows);
     if (coveringMaintenance) {
-      cursor = new Date(coveringMaintenance.end);
+      cursor = coveringMaintenance.end;
       continue;
     }
 
-    return cursor;
+    return cursor.toJSDate();
   }
 
   throw new Error("Could not find next working instant; check shift or maintenance configuration.");
@@ -151,16 +171,17 @@ export function addWorkingMinutes(
   if (durationMinutes < 0) {
     throw new Error("durationMinutes cannot be negative");
   }
+
   if (durationMinutes === 0) {
     return new Date(startDate);
   }
 
   const windows = normalizeWindows(maintenanceWindows);
-  let cursor = moveToNextWorkingInstant(startDate, shifts, maintenanceWindows);
+  let cursor = toUtcDateTime(moveToNextWorkingInstant(startDate, shifts, maintenanceWindows));
   let remaining = durationMinutes;
 
   for (let guard = 0; guard < 20000; guard += 1) {
-    cursor = moveToNextWorkingInstant(cursor, shifts, maintenanceWindows);
+    cursor = toUtcDateTime(moveToNextWorkingInstant(cursor.toJSDate(), shifts, maintenanceWindows));
 
     const currentShift = findCurrentShiftWindow(cursor, shifts);
     if (!currentShift) {
@@ -170,19 +191,19 @@ export function addWorkingMinutes(
 
     const nextMaintenanceStart = nextMaintenanceStartInRange(cursor, currentShift.end, windows);
     const segmentEnd = nextMaintenanceStart ?? currentShift.end;
-    const workableMinutes = minutesBetween(cursor, segmentEnd);
+    const workableMinutes = Math.max(0, Math.floor(segmentEnd.diff(cursor, "minutes").minutes));
 
     if (workableMinutes <= 0) {
-      cursor = new Date(segmentEnd.getTime() + MINUTE_MS);
+      cursor = segmentEnd.plus({ minutes: 1 });
       continue;
     }
 
     if (remaining <= workableMinutes) {
-      return addMinutes(cursor, remaining);
+      return cursor.plus({ minutes: remaining }).toJSDate();
     }
 
     remaining -= workableMinutes;
-    cursor = new Date(segmentEnd);
+    cursor = segmentEnd;
   }
 
   throw new Error("Exceeded working-time calculation guard; schedule may be impossible.");
