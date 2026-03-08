@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "demo": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "luxon": "^3.7.2"
@@ -14,6 +15,7 @@
   "devDependencies": {
     "@types/luxon": "^3.7.1",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   }
 }
