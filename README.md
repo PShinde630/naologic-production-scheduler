@@ -51,6 +51,10 @@ This prints for each scenario:
 - reason(s) for each change
 - explanation summary
 
+## Demo video (Loom)
+
+https://www.loom.com/share/8cc19a021c75490aa9f136c52bb40b4e
+
 ## Run tests
 
 ```bash
