@@ -1,0 +1,15 @@
+{
+  "name": "naologic-production-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production schedule reflow technical test",
+  "type": "module",
+  "scripts": {
+    "demo": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}
