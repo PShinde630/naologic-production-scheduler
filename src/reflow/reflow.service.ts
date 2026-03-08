@@ -17,21 +17,34 @@ import {
 
 export class ReflowService {
   reflow(input: ReflowInput): ReflowResult {
+    // Quick lookup maps so we do not scan full arrays again and again.
     const workCenterById = new Map<string, WorkCenter>(input.workCenters.map((wc) => [wc.docId, wc]));
     const workOrderById = new Map<string, WorkOrder>(input.workOrders.map((wo) => [wo.docId, wo]));
 
+    // Validate references first so scheduling does not fail halfway.
     this.validateReferences(workOrderById, workCenterById);
 
+    // Dependency-safe order.
+    // Example: if B depends on A, A appears before B in this order.
     const orderedWorkOrderIds = this.topologicalSort(input.workOrders);
+
+    // Keeps machine reservations in time order per work center.
     const reservationsByCenterId = new Map<string, ScheduledInterval[]>();
+
+    // Final calculated schedule for each work order.
     const scheduledByWorkOrderId = new Map<string, { start: Date; end: Date }>();
+
+    // Human-readable reasons for changes per work order.
     const reasonsByWorkOrderId = new Map<string, string[]>();
 
+    // Main scheduling loop: schedule one work order at a time.
     for (const workOrderId of orderedWorkOrderIds) {
       const workOrder = workOrderById.get(workOrderId)!;
       const workCenter = workCenterById.get(workOrder.data.workCenterId)!;
       const reservations = this.ensureReservationBucket(reservationsByCenterId, workCenter.docId);
 
+      // Maintenance work orders are fixed and cannot move.
+      // We only validate and reserve them as-is.
       if (workOrder.data.isMaintenance) {
         const fixedStart = parseIso(workOrder.data.startDate);
         const fixedEnd = parseIso(workOrder.data.endDate);
@@ -57,6 +70,8 @@ export class ReflowService {
       let candidateStart = parseIso(workOrder.data.startDate);
       const reasons: string[] = [];
 
+      // Rule: child must wait for all parents.
+      // Example: if parents end at 10:00 and 11:30, child can start at 11:30.
       const latestParentEnd = this.getLatestParentEnd(workOrder, scheduledByWorkOrderId);
       if (latestParentEnd && latestParentEnd > candidateStart) {
         candidateStart = latestParentEnd;
@@ -71,7 +86,9 @@ export class ReflowService {
       }
 
       let scheduledEnd = new Date(candidateStart);
+      // Keep trying until this order gets a conflict-free [start, end] range.
       for (let guard = 0; guard < 10000; guard += 1) {
+        // Push start to next machine-available and shift-valid instant.
         candidateStart = this.findEarliestCenterWorkingStart(
           workOrder,
           workCenter,
@@ -87,6 +104,7 @@ export class ReflowService {
           workCenter.data.maintenanceWindows
         );
 
+        // If full interval overlaps, push start after overlap and retry.
         const overlap = this.findFirstOverlap(candidateStart, scheduledEnd, reservations);
         if (!overlap) {
           break;
@@ -101,6 +119,8 @@ export class ReflowService {
       }
 
       const wallClockMinutes = minutesBetween(candidateStart, scheduledEnd);
+      // If wall time is larger than working duration, we paused due to shift/maintenance.
+      // Example: duration=120 but start->end spans 180 mins => 60 mins were paused.
       if (wallClockMinutes > workOrder.data.durationMinutes) {
         if (this.intersectsMaintenanceWindow(candidateStart, scheduledEnd, workCenter)) {
           reasons.push("Paused during maintenance window on the work center");
@@ -116,6 +136,7 @@ export class ReflowService {
       reasonsByWorkOrderId.set(workOrder.docId, Array.from(new Set(reasons)));
     }
 
+    // Build output with updated start/end dates.
     const updatedWorkOrders = input.workOrders.map((workOrder) => {
       const scheduled = scheduledByWorkOrderId.get(workOrder.docId);
       if (!scheduled) {
@@ -135,6 +156,7 @@ export class ReflowService {
     const changes = this.buildChanges(input.workOrders, updatedWorkOrders, reasonsByWorkOrderId);
     const explanation = this.buildExplanation(changes, input.workOrders.length);
 
+    // Final output expected by caller (demo/tests/API usage).
     return {
       updatedWorkOrders,
       changes,
@@ -146,6 +168,7 @@ export class ReflowService {
     workOrderById: Map<string, WorkOrder>,
     workCenterById: Map<string, WorkCenter>
   ): void {
+    // Defensive checks for common bad-input issues.
     for (const workOrder of workOrderById.values()) {
       if (!workCenterById.has(workOrder.data.workCenterId)) {
         throw new Error(
@@ -166,6 +189,7 @@ export class ReflowService {
   }
 
   private topologicalSort(workOrders: WorkOrder[]): string[] {
+    // Kahn's algorithm for dependency ordering + cycle detection.
     const childrenByParent = new Map<string, string[]>();
     const indegreeById = new Map<string, number>();
 
@@ -190,6 +214,7 @@ export class ReflowService {
 
     const ordered: string[] = [];
 
+    // Pull ready nodes (indegree 0), then reduce indegrees of their children.
     while (queue.length > 0) {
       const current = queue.shift()!;
       ordered.push(current);
@@ -214,6 +239,7 @@ export class ReflowService {
     workOrder: WorkOrder,
     scheduledByWorkOrderId: Map<string, { start: Date; end: Date }>
   ): Date | null {
+    // Find the latest parent completion.
     let latest: Date | null = null;
 
     for (const dependencyId of workOrder.data.dependsOnWorkOrderIds) {
@@ -233,6 +259,7 @@ export class ReflowService {
     latestParentEnd: Date,
     scheduledByWorkOrderId: Map<string, { start: Date; end: Date }>
   ): string[] {
+    // Return the parent ids that are actually blocking this order start.
     const blocking: string[] = [];
     for (const dependencyId of workOrder.data.dependsOnWorkOrderIds) {
       const parent = scheduledByWorkOrderId.get(dependencyId);
@@ -247,6 +274,7 @@ export class ReflowService {
     reservationsByCenterId: Map<string, ScheduledInterval[]>,
     workCenterId: string
   ): ScheduledInterval[] {
+    // Create reservation list lazily per work center.
     const existing = reservationsByCenterId.get(workCenterId);
     if (existing) {
       return existing;
@@ -264,17 +292,23 @@ export class ReflowService {
     initialCandidate: Date,
     reasons: string[]
   ): Date {
+    // Keep adjusting start until it is both:
+    // 1) not inside another reservation, and 2) in a valid working instant.
     let candidate = new Date(initialCandidate);
 
     for (let guard = 0; guard < 10000; guard += 1) {
       const previous = candidate;
 
+      // Example: if candidate=09:30 and another order runs 09:00-10:00,
+      // move candidate to 10:00.
       const availableStart = this.nextNonOverlappingStart(candidate, reservations);
       if (availableStart.getTime() !== candidate.getTime()) {
         candidate = availableStart;
         reasons.push("Work center conflict (machine already occupied)");
       }
 
+      // Example: if candidate lands at 19:00 and shift is 08:00-17:00,
+      // move to next shift start.
       const shifted = moveToNextWorkingInstant(
         candidate,
         workCenter.data.shifts,
@@ -298,6 +332,7 @@ export class ReflowService {
   }
 
   private nextNonOverlappingStart(candidate: Date, reservations: ScheduledInterval[]): Date {
+    // If candidate is inside an interval, move to that interval's end.
     if (reservations.length === 0) {
       return candidate;
     }
@@ -323,6 +358,7 @@ export class ReflowService {
     end: Date,
     reservations: ScheduledInterval[]
   ): void {
+    // Final overlap guard before we reserve the interval.
     for (const interval of reservations) {
       if (interval.workOrderId === workOrderId) {
         continue;
@@ -341,6 +377,7 @@ export class ReflowService {
     end: Date,
     reservations: ScheduledInterval[]
   ): ScheduledInterval | null {
+    // Returns first interval that intersects [start, end], if any.
     for (const interval of reservations) {
       if (start < interval.end && end > interval.start) {
         return interval;
@@ -355,6 +392,7 @@ export class ReflowService {
     end: Date,
     reservations: ScheduledInterval[]
   ): void {
+    // Save reservation and keep them sorted by start time.
     reservations.push({ workOrderId, start, end });
     reservations.sort((a, b) => a.start.getTime() - b.start.getTime());
   }
@@ -364,6 +402,7 @@ export class ReflowService {
     updated: WorkOrder[],
     reasonsByWorkOrderId: Map<string, string[]>
   ): ReflowChange[] {
+    // Compare old vs new schedule and keep only changed orders.
     const updatedById = new Map<string, WorkOrder>(updated.map((w) => [w.docId, w]));
 
     const changes: ReflowChange[] = [];
@@ -403,6 +442,7 @@ export class ReflowService {
   }
 
   private buildExplanation(changes: ReflowChange[], totalOrders: number): string[] {
+    // Small summary line per changed work order for demo/readme output.
     if (changes.length === 0) {
       return ["No schedule changes were needed. Existing schedule already satisfied all constraints."];
     }
@@ -421,6 +461,7 @@ export class ReflowService {
   }
 
   private isInMaintenanceWindow(date: Date, workCenter: WorkCenter): boolean {
+    // True when `date` lands inside any blocked maintenance window.
     for (const window of workCenter.data.maintenanceWindows) {
       const start = parseIso(window.startDate);
       const end = parseIso(window.endDate);
@@ -432,6 +473,8 @@ export class ReflowService {
   }
 
   private intersectsMaintenanceWindow(start: Date, end: Date, workCenter: WorkCenter): boolean {
+    // True when [start, end] intersects any maintenance window.
+    // Example: job 12:30-15:30 intersects maintenance 13:00-14:00.
     for (const window of workCenter.data.maintenanceWindows) {
       const windowStart = parseIso(window.startDate);
       const windowEnd = parseIso(window.endDate);
@@ -443,6 +486,8 @@ export class ReflowService {
   }
 
   private isWithinSingleShiftWindow(start: Date, end: Date, workCenter: WorkCenter): boolean {
+    // Helper for reason text: tells if interval stayed in a single shift block.
+    // If not, we know job had to pause at least once.
     if (start.getUTCFullYear() !== end.getUTCFullYear()) {
       return false;
     }

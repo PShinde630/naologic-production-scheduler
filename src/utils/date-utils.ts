@@ -7,6 +7,7 @@ interface Range {
 }
 
 function toUtcDateTime(date: Date): DateTime {
+  // Keep all calculations in UTC to avoid timezone confusion.
   return DateTime.fromJSDate(date, { zone: "utc" });
 }
 
@@ -16,6 +17,7 @@ function toDocDayOfWeek(dateTime: DateTime): number {
 }
 
 export function parseIso(input: string): Date {
+  // Parse ISO string safely and fail fast on bad values.
   const parsed = DateTime.fromISO(input, { zone: "utc" });
   if (!parsed.isValid) {
     throw new Error(`Invalid ISO date: ${input}`);
@@ -24,6 +26,7 @@ export function parseIso(input: string): Date {
 }
 
 export function formatIso(date: Date): string {
+  // Output with milliseconds so results are consistent in logs/tests.
   return toUtcDateTime(date).toISO({ suppressMilliseconds: false }) ?? date.toISOString();
 }
 
@@ -32,19 +35,23 @@ export function maxDate(a: Date, b: Date): Date {
 }
 
 export function addMinutes(date: Date, minutes: number): Date {
+  // Adds working/non-working agnostic minutes to a timestamp.
   return toUtcDateTime(date).plus({ minutes }).toJSDate();
 }
 
 export function minutesBetween(start: Date, end: Date): number {
+  // Returns non-negative minute difference, floored.
   const diff = toUtcDateTime(end).diff(toUtcDateTime(start), "minutes").minutes;
   return Math.max(0, Math.floor(diff));
 }
 
 export function clampToHourUTC(date: Date, hour: number): Date {
+  // Example: 2026-03-09T12:34 + hour=8 => 2026-03-09T08:00:00Z
   return toUtcDateTime(date).startOf("day").plus({ hours: hour }).toJSDate();
 }
 
 export function shiftWindowForDate(date: Date, shift: Shift): Range {
+  // Convert a shift config to real start/end timestamps for that date.
   const base = toUtcDateTime(date).startOf("day");
   return {
     start: base.plus({ hours: shift.startHour }),
@@ -53,16 +60,20 @@ export function shiftWindowForDate(date: Date, shift: Shift): Range {
 }
 
 function dayStartUTC(dateTime: DateTime): DateTime {
+  // Reset to 00:00 of same UTC day.
   return dateTime.startOf("day");
 }
 
 function shiftsForDay(shifts: Shift[], dayOfWeek: number): Shift[] {
+  // Return day shifts sorted so we can scan in chronological order.
   return shifts
     .filter((s) => s.dayOfWeek === dayOfWeek)
     .sort((a, b) => a.startHour - b.startHour);
 }
 
 function findCurrentShiftWindow(dateTime: DateTime, shifts: Shift[]): Range | null {
+  // Find shift that currently contains dateTime.
+  // Example: 10:30 with shift 08:00-17:00 => returns that shift range.
   const dayShifts = shiftsForDay(shifts, toDocDayOfWeek(dateTime));
 
   for (const shift of dayShifts) {
@@ -76,6 +87,8 @@ function findCurrentShiftWindow(dateTime: DateTime, shifts: Shift[]): Range | nu
 }
 
 function findNextShiftStart(dateTime: DateTime, shifts: Shift[]): DateTime {
+  // Find next valid shift start in upcoming days.
+  // Example: 19:00 Monday => 08:00 Tuesday.
   const baseDay = dayStartUTC(dateTime);
 
   for (let offsetDays = 0; offsetDays < 14; offsetDays += 1) {
@@ -94,6 +107,7 @@ function findNextShiftStart(dateTime: DateTime, shifts: Shift[]): DateTime {
 }
 
 function normalizeWindows(windows: MaintenanceWindow[]): Range[] {
+  // Parse, clean, and sort maintenance windows once for faster checks.
   return windows
     .map((w) => ({
       start: DateTime.fromISO(w.startDate, { zone: "utc" }),
@@ -104,6 +118,7 @@ function normalizeWindows(windows: MaintenanceWindow[]): Range[] {
 }
 
 function findMaintenanceCovering(dateTime: DateTime, windows: Range[]): Range | null {
+  // Returns maintenance window if dateTime is inside one.
   for (const window of windows) {
     if (dateTime >= window.start && dateTime < window.end) {
       return window;
@@ -122,6 +137,7 @@ function nextMaintenanceStartInRange(
   to: DateTime,
   windows: Range[]
 ): DateTime | null {
+  // Find next maintenance start between [from, to).
   for (const window of windows) {
     if (window.start >= to) {
       return null;
@@ -140,6 +156,8 @@ export function moveToNextWorkingInstant(
   shifts: Shift[],
   maintenanceWindows: MaintenanceWindow[]
 ): Date {
+  // Move cursor to first timestamp where work is allowed.
+  // Rules: inside shift and outside maintenance.
   const windows = normalizeWindows(maintenanceWindows);
   let cursor = toUtcDateTime(date);
 
@@ -168,6 +186,9 @@ export function addWorkingMinutes(
   shifts: Shift[],
   maintenanceWindows: MaintenanceWindow[]
 ): Date {
+  // Core helper:
+  // consume only "working minutes", skipping shift gaps and maintenance windows.
+  // Example: start 16:00, duration 120, shift ends 17:00 => resume next day 08:00 for remaining 60.
   if (durationMinutes < 0) {
     throw new Error("durationMinutes cannot be negative");
   }
@@ -180,6 +201,7 @@ export function addWorkingMinutes(
   let cursor = toUtcDateTime(moveToNextWorkingInstant(startDate, shifts, maintenanceWindows));
   let remaining = durationMinutes;
 
+  // Walk segment by segment until remaining working minutes become 0.
   for (let guard = 0; guard < 20000; guard += 1) {
     cursor = toUtcDateTime(moveToNextWorkingInstant(cursor.toJSDate(), shifts, maintenanceWindows));
 
@@ -191,6 +213,9 @@ export function addWorkingMinutes(
 
     const nextMaintenanceStart = nextMaintenanceStartInRange(cursor, currentShift.end, windows);
     const segmentEnd = nextMaintenanceStart ?? currentShift.end;
+
+    // Workable chunk = [cursor, segmentEnd)
+    // segmentEnd can be shift end or maintenance start, whichever comes first.
     const workableMinutes = Math.max(0, Math.floor(segmentEnd.diff(cursor, "minutes").minutes));
 
     if (workableMinutes <= 0) {

@@ -7,6 +7,7 @@ export interface ConstraintViolation {
 }
 
 export function validateNoOverlaps(workOrders: WorkOrder[]): ConstraintViolation[] {
+  // Group orders by machine/work center first.
   const byCenter = new Map<string, WorkOrder[]>();
   for (const wo of workOrders) {
     const list = byCenter.get(wo.data.workCenterId) ?? [];
@@ -16,6 +17,8 @@ export function validateNoOverlaps(workOrders: WorkOrder[]): ConstraintViolation
 
   const violations: ConstraintViolation[] = [];
   for (const orders of byCenter.values()) {
+    // Compare neighbors in time order.
+    // Example: if A ends 10:00 and B starts 09:30 -> overlap violation.
     const sorted = [...orders].sort(
       (a, b) => parseIso(a.data.startDate).getTime() - parseIso(b.data.startDate).getTime()
     );
@@ -38,11 +41,13 @@ export function validateNoOverlaps(workOrders: WorkOrder[]): ConstraintViolation
 }
 
 export function validateDependencies(workOrders: WorkOrder[]): ConstraintViolation[] {
+  // Lookup map so parent checks are O(1).
   const byId = new Map(workOrders.map((wo) => [wo.docId, wo]));
   const violations: ConstraintViolation[] = [];
 
   for (const wo of workOrders) {
     const start = parseIso(wo.data.startDate);
+    // Child must start at or after every parent end.
     for (const parentId of wo.data.dependsOnWorkOrderIds) {
       const parent = byId.get(parentId);
       if (!parent) {
@@ -63,6 +68,7 @@ export function validateDependencies(workOrders: WorkOrder[]): ConstraintViolati
 }
 
 export function validateTemporalIntegrity(workOrders: WorkOrder[]): ConstraintViolation[] {
+  // Basic sanity check: every order must have end > start.
   const violations: ConstraintViolation[] = [];
 
   for (const wo of workOrders) {
