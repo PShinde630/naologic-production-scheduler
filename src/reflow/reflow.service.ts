@@ -60,7 +60,14 @@ export class ReflowService {
       const latestParentEnd = this.getLatestParentEnd(workOrder, scheduledByWorkOrderId);
       if (latestParentEnd && latestParentEnd > candidateStart) {
         candidateStart = latestParentEnd;
-        reasons.push("Dependency delay (waiting for parent completion)");
+        const blockingParents = this.getBlockingParentIds(
+          workOrder,
+          latestParentEnd,
+          scheduledByWorkOrderId
+        );
+        reasons.push(
+          `Waited for dependency completion (${blockingParents.join(", ")}) until ${formatIso(latestParentEnd)}`
+        );
       }
 
       let scheduledEnd = new Date(candidateStart);
@@ -85,12 +92,22 @@ export class ReflowService {
           break;
         }
 
-        reasons.push(`Work center conflict with ${overlap.workOrderId}, pushed after overlap`);
+        reasons.push(`Machine busy with ${overlap.workOrderId}; moved start after it finished`);
         candidateStart = moveToNextWorkingInstant(
           overlap.end,
           workCenter.data.shifts,
           workCenter.data.maintenanceWindows
         );
+      }
+
+      const wallClockMinutes = minutesBetween(candidateStart, scheduledEnd);
+      if (wallClockMinutes > workOrder.data.durationMinutes) {
+        if (this.intersectsMaintenanceWindow(candidateStart, scheduledEnd, workCenter)) {
+          reasons.push("Paused during maintenance window on the work center");
+        }
+        if (!this.isWithinSingleShiftWindow(candidateStart, scheduledEnd, workCenter)) {
+          reasons.push("Paused at shift boundary and resumed in next active shift");
+        }
       }
 
       this.ensureNoOverlap(workOrder.docId, candidateStart, scheduledEnd, reservations);
@@ -211,6 +228,21 @@ export class ReflowService {
     return latest;
   }
 
+  private getBlockingParentIds(
+    workOrder: WorkOrder,
+    latestParentEnd: Date,
+    scheduledByWorkOrderId: Map<string, { start: Date; end: Date }>
+  ): string[] {
+    const blocking: string[] = [];
+    for (const dependencyId of workOrder.data.dependsOnWorkOrderIds) {
+      const parent = scheduledByWorkOrderId.get(dependencyId);
+      if (parent && parent.end.getTime() === latestParentEnd.getTime()) {
+        blocking.push(dependencyId);
+      }
+    }
+    return blocking.length > 0 ? blocking : workOrder.data.dependsOnWorkOrderIds;
+  }
+
   private ensureReservationBucket(
     reservationsByCenterId: Map<string, ScheduledInterval[]>,
     workCenterId: string
@@ -249,8 +281,12 @@ export class ReflowService {
         workCenter.data.maintenanceWindows
       );
       if (shifted.getTime() !== candidate.getTime()) {
+        if (this.isInMaintenanceWindow(candidate, workCenter)) {
+          reasons.push("Start moved to avoid maintenance window");
+        } else {
+          reasons.push("Start moved to next active shift");
+        }
         candidate = shifted;
-        reasons.push("Shift or maintenance adjustment");
       }
 
       if (candidate.getTime() === previous.getTime()) {
@@ -348,14 +384,8 @@ export class ReflowService {
       }
 
       const reasons = [...(reasonsByWorkOrderId.get(originalOrder.docId) ?? [])];
-      if (newStart > oldStart) {
-        reasons.push("Start moved later to satisfy constraints");
-      }
-      if (newEnd > oldEnd) {
-        reasons.push("End moved later after working-time recalculation");
-      }
       if (reasons.length === 0) {
-        reasons.push("Schedule normalized");
+        reasons.push("Schedule recalculated to satisfy constraints");
       }
 
       changes.push({
@@ -380,11 +410,64 @@ export class ReflowService {
     const lines = [`Reflow updated ${changes.length} of ${totalOrders} work orders.`];
 
     for (const change of changes) {
+      const startDelayMinutes = minutesBetween(parseIso(change.oldStartDate), parseIso(change.newStartDate));
+      const endDelayMinutes = minutesBetween(parseIso(change.oldEndDate), parseIso(change.newEndDate));
       lines.push(
-        `- ${change.workOrderId}: start ${change.oldStartDate} -> ${change.newStartDate}, end ${change.oldEndDate} -> ${change.newEndDate}`
+        `- ${change.workOrderId}: start delay ${startDelayMinutes} min, end delay ${endDelayMinutes} min. Why: ${change.reasons.join(" | ")}`
       );
     }
 
     return lines;
+  }
+
+  private isInMaintenanceWindow(date: Date, workCenter: WorkCenter): boolean {
+    for (const window of workCenter.data.maintenanceWindows) {
+      const start = parseIso(window.startDate);
+      const end = parseIso(window.endDate);
+      if (date >= start && date < end) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private intersectsMaintenanceWindow(start: Date, end: Date, workCenter: WorkCenter): boolean {
+    for (const window of workCenter.data.maintenanceWindows) {
+      const windowStart = parseIso(window.startDate);
+      const windowEnd = parseIso(window.endDate);
+      if (start < windowEnd && end > windowStart) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private isWithinSingleShiftWindow(start: Date, end: Date, workCenter: WorkCenter): boolean {
+    if (start.getUTCFullYear() !== end.getUTCFullYear()) {
+      return false;
+    }
+    if (start.getUTCMonth() !== end.getUTCMonth()) {
+      return false;
+    }
+    if (start.getUTCDate() !== end.getUTCDate()) {
+      return false;
+    }
+
+    const dayOfWeek = start.getUTCDay();
+    for (const shift of workCenter.data.shifts) {
+      if (shift.dayOfWeek !== dayOfWeek) {
+        continue;
+      }
+
+      const shiftStart = new Date(start);
+      shiftStart.setUTCHours(shift.startHour, 0, 0, 0);
+      const shiftEnd = new Date(start);
+      shiftEnd.setUTCHours(shift.endHour, 0, 0, 0);
+      if (start >= shiftStart && end <= shiftEnd) {
+        return true;
+      }
+    }
+
+    return false;
   }
 }
